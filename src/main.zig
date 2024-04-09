@@ -12,13 +12,12 @@ pub fn print(comptime message: []const u8, args: anytype) !void {
     try bw.flush();
 }
 
-pub fn connect(target: []u8, port: u16) !void {
+pub fn connect(address: std.net.Address, port: u16) !void {
     const sockfd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
     errdefer posix.close(sockfd);
 
     _ = try posix.fcntl(sockfd, posix.F.SETFL, os.linux.SOCK.NONBLOCK);
 
-    const address = try std.net.Address.parseIp(target, port);
     if (posix.connect(sockfd, &address.any, address.getOsSockLen())) |_| {
         try print("1: port {} is open\n", .{port});
     } else |err| switch (err) {
@@ -60,13 +59,22 @@ pub fn main() !void {
         std.posix.exit(1);
     }
 
-    const target = args[1];
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    const addr_list = try std.net.getAddressList(allocator, args[1], 80);
+    defer addr_list.deinit();
+
+    var addr = addr_list.addrs[0];
     const ports = [_]u16{ 22, 80, 443, 8080, 12017, 5432, 8081 };
 
     var thr: [ports.len]std.Thread = undefined;
 
     for (&thr, 0..) |*item, i| {
-        item.* = try std.Thread.spawn(.{}, connect, .{ target, ports[i] });
+        addr.setPort(ports[i]);
+        item.* = try std.Thread.spawn(.{}, connect, .{ addr, ports[i] });
     }
 
     for (thr) |t| {

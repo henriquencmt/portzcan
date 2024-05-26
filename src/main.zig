@@ -1,6 +1,7 @@
 const std = @import("std");
 const os = std.os;
 const posix = std.posix;
+const tcp_syn = @import("tcp_syn.zig");
 
 pub fn print(comptime message: []const u8, args: anytype) !void {
     const stdout_file = std.io.getStdOut().writer();
@@ -13,7 +14,8 @@ pub fn print(comptime message: []const u8, args: anytype) !void {
 }
 
 pub fn connect(address: std.net.Address, port: u16) !void {
-    const sockfd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+    var sockfd: posix.fd_t = undefined;
+    sockfd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
     errdefer posix.close(sockfd);
 
     _ = try posix.fcntl(sockfd, posix.F.SETFL, os.linux.SOCK.NONBLOCK);
@@ -33,7 +35,7 @@ pub fn connect(address: std.net.Address, port: u16) !void {
             var events: [1]os.linux.epoll_event = undefined;
             const nfds = posix.epoll_wait(epollfd, &events, 1000);
             switch (nfds) {
-                0 => try print("socket timeout trying to connect to port {}\n", .{port}),
+                0 => try print("timeout trying to connect to port {}\n", .{port}),
                 1 => {
                     var so_error: i32 = undefined;
                     var size: u32 = @sizeOf(u32);
@@ -54,9 +56,21 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(std.heap.page_allocator);
     defer std.process.argsFree(std.heap.page_allocator, args);
 
-    if (args.len < 2) {
-        std.debug.print("Usage: {s} <address>\n", .{args[0]});
-        std.posix.exit(1);
+    const address: []u8 = args[1][0..args[1].len];
+    var stealth: []u8 = "";
+    var stealthMode: bool = false;
+    switch (args.len) {
+        2 => {
+            std.debug.print("normal mode\n", .{});
+        },
+        3 => {
+            stealth = args[2][0..args[2].len];
+            stealthMode = true;
+        },
+        else => {
+            std.debug.print("Usage: {s} <address> [OPTIONS]\n", .{args[0]});
+            std.posix.exit(1);
+        },
     }
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -64,7 +78,7 @@ pub fn main() !void {
 
     const allocator = arena.allocator();
 
-    const addr_list = try std.net.getAddressList(allocator, args[1], 80);
+    const addr_list = try std.net.getAddressList(allocator, address, 0);
     defer addr_list.deinit();
 
     var addr = addr_list.addrs[0];
@@ -72,9 +86,17 @@ pub fn main() !void {
 
     var thr: [ports.len]std.Thread = undefined;
 
-    for (&thr, 0..) |*item, i| {
-        addr.setPort(ports[i]);
-        item.* = try std.Thread.spawn(.{}, connect, .{ addr, ports[i] });
+    if (stealthMode) {
+        const s_addr = 172 << 24 | 30 << 16 | 188 << 8 | 242;
+        for (&thr, 0..) |*item, i| {
+            // TODO addr.setPort(ports[i]);
+            item.* = try std.Thread.spawn(.{}, tcp_syn.run, .{ s_addr, addr.in.sa.addr, ports[i] });
+        }
+    } else {
+        for (&thr, 0..) |*item, i| {
+            addr.setPort(ports[i]);
+            item.* = try std.Thread.spawn(.{}, connect, .{ addr, ports[i] });
+        }
     }
 
     for (thr) |t| {

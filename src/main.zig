@@ -56,19 +56,25 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(std.heap.page_allocator);
     defer std.process.argsFree(std.heap.page_allocator, args);
 
-    const address: []u8 = args[1][0..args[1].len];
-    var stealth: []u8 = "";
+    var address: []u8 = undefined;
     var stealthMode: bool = false;
     switch (args.len) {
         2 => {
             std.debug.print("normal mode\n", .{});
+            address = args[1][0..args[1].len];
         },
         3 => {
-            stealth = args[2][0..args[2].len];
-            stealthMode = true;
+            if (std.mem.eql(u8, args[1][0..args[1].len], "-s")) {
+                std.debug.print("stealth mode\n", .{});
+                stealthMode = true;
+                address = args[2][0..args[2].len];
+            } else {
+                std.debug.print("Usage: {s} [OPTIONS] ADDRESS\n", .{args[0]});
+                std.posix.exit(1);
+            }
         },
         else => {
-            std.debug.print("Usage: {s} <address> [OPTIONS]\n", .{args[0]});
+            std.debug.print("Usage: {s} [OPTIONS] ADDRESS\n", .{args[0]});
             std.posix.exit(1);
         },
     }

@@ -53,8 +53,12 @@ pub fn connect(address: std.net.Address, port: u16) !void {
 }
 
 pub fn main() !void {
-    const args = try std.process.argsAlloc(std.heap.page_allocator);
-    defer std.process.argsFree(std.heap.page_allocator, args);
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    const args = try std.process.argsAlloc(allocator);
 
     var address: []u8 = undefined;
     var stealthMode: bool = false;
@@ -78,11 +82,6 @@ pub fn main() !void {
             std.posix.exit(1);
         },
     }
-
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-
-    const allocator = arena.allocator();
 
     const addr_list = try std.net.getAddressList(allocator, address, 0);
     defer addr_list.deinit();

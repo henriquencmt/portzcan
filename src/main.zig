@@ -60,47 +60,58 @@ pub fn main() !void {
 
     const args = try std.process.argsAlloc(allocator);
 
-    var address: []u8 = undefined;
-    var stealthMode: bool = false;
+    var settings: Settings = .{};
+
     switch (args.len) {
         2 => {
-            std.debug.print("normal mode\n", .{});
-            address = args[1][0..args[1].len];
+            settings.address = args[1][0..args[1].len];
         },
         3 => {
             if (std.mem.eql(u8, args[1][0..args[1].len], "-s")) {
-                std.debug.print("stealth mode\n", .{});
-                stealthMode = true;
-                address = args[2][0..args[2].len];
+                settings.mode = "tcpsyn";
+                settings.address = args[2][0..args[2].len];
+            } else if (true) { // TODO match regex pattern
+                settings.address = args[1][0..args[1].len];
+                settings.ports = try parsePorts(args[2], allocator);
             } else {
-                std.debug.print("Usage: {s} [OPTIONS] ADDRESS\n", .{args[0]});
+                std.debug.print("Usage: {s} [OPTIONS] ADDRESS [PORTS]\n", .{args[0]});
+                std.posix.exit(1);
+            }
+        },
+        4 => {
+            settings.address = args[2][0..args[2].len];
+            if (std.mem.eql(u8, args[1][0..args[1].len], "-s") and true) { // TODO match regex pattern
+                settings.mode = "synack";
+                settings.address = args[2][0..args[2].len];
+                settings.ports = try parsePorts(args[3], allocator);
+            } else {
+                std.debug.print("Usage: {s} [OPTIONS] ADDRESS [PORTS]\n", .{args[0]});
                 std.posix.exit(1);
             }
         },
         else => {
-            std.debug.print("Usage: {s} [OPTIONS] ADDRESS\n", .{args[0]});
+            std.debug.print("Usage: {s} [OPTIONS] ADDRESS [PORTS]\n", .{args[0]});
             std.posix.exit(1);
         },
     }
 
-    const addr_list = try std.net.getAddressList(allocator, address, 0);
+    const addr_list = try std.net.getAddressList(allocator, settings.address, 0);
     defer addr_list.deinit();
 
     var addr = addr_list.addrs[0];
-    const ports = [_]u16{ 22, 80, 443, 8080, 12017, 5432, 8081 };
 
-    var thr: [ports.len]std.Thread = undefined;
+    const thr = try allocator.alloc(std.Thread, settings.ports.len);
 
-    if (stealthMode) {
+    if (std.mem.eql(u8, settings.mode, "tcpsyn")) {
         const s_addr = 172 << 24 | 30 << 16 | 188 << 8 | 242;
-        for (&thr, 0..) |*item, i| {
+        for (thr, 0..) |*item, i| {
             // TODO addr.setPort(ports[i]);
-            item.* = try std.Thread.spawn(.{}, tcp_syn.run, .{ s_addr, addr.in.sa.addr, ports[i] });
+            item.* = try std.Thread.spawn(.{}, tcp_syn.run, .{ s_addr, addr.in.sa.addr, settings.ports[i] });
         }
     } else {
-        for (&thr, 0..) |*item, i| {
-            addr.setPort(ports[i]);
-            item.* = try std.Thread.spawn(.{}, connect, .{ addr, ports[i] });
+        for (thr, 0..) |*item, i| {
+            addr.setPort(settings.ports[i]);
+            item.* = try std.Thread.spawn(.{}, connect, .{ addr, settings.ports[i] });
         }
     }
 
@@ -108,3 +119,31 @@ pub fn main() !void {
         t.join();
     }
 }
+
+fn parsePorts(ports_arg: [:0]u8, allocator: std.mem.Allocator) ![]u16 {
+    var ports = std.ArrayList(u16).init(allocator);
+    var curr: []u8 = try allocator.alloc(u8, 5);
+    var byte_count: usize = 0;
+
+    for (ports_arg) |port| {
+        if (port == 44) { // comma
+            try ports.append(try std.fmt.parseInt(u16, curr[0..byte_count], 10));
+            allocator.free(curr);
+            curr = try allocator.alloc(u8, 5);
+            byte_count = 0;
+        } else {
+            curr[byte_count] = port;
+            byte_count += 1;
+        }
+    }
+    try ports.append(try std.fmt.parseInt(u16, curr[0..byte_count], 10));
+    allocator.free(curr);
+
+    return ports.items;
+}
+
+const Settings = struct {
+    mode: []const u8 = "default",
+    address: []u8 = undefined,
+    ports: []const u16 = &[7]u16{ 22, 80, 443, 8080, 12017, 5432, 8081 },
+};

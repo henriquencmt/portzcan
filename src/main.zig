@@ -3,55 +3,6 @@ const os = std.os;
 const posix = std.posix;
 const tcp_syn = @import("tcp_syn.zig");
 
-pub fn print(comptime message: []const u8, args: anytype) !void {
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
-
-    try stdout.print(message, args);
-
-    try bw.flush();
-}
-
-pub fn connect(address: std.net.Address) !void {
-    var sockfd: posix.fd_t = undefined;
-    sockfd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
-    errdefer posix.close(sockfd);
-
-    _ = try posix.fcntl(sockfd, posix.F.SETFL, os.linux.SOCK.NONBLOCK);
-
-    if (posix.connect(sockfd, &address.any, address.getOsSockLen())) |_| {
-        try print("port {} is open\n", .{address.getPort()});
-    } else |err| switch (err) {
-        error.ConnectionRefused => try print("port {} is closed\n", .{address.getPort()}),
-        error.WouldBlock => {
-            const epollfd = try posix.epoll_create1(0);
-            var ev: os.linux.epoll_event = .{
-                .events = os.linux.EPOLL.OUT,
-                .data = .{ .fd = sockfd },
-            };
-            _ = try posix.epoll_ctl(epollfd, os.linux.EPOLL.CTL_ADD, sockfd, &ev);
-
-            var events: [1]os.linux.epoll_event = undefined;
-            const nfds = posix.epoll_wait(epollfd, &events, 1000);
-            switch (nfds) {
-                0 => try print("timeout trying to connect to port {}\n", .{address.getPort()}),
-                1 => {
-                    var so_error: i32 = undefined;
-                    var size: u32 = @sizeOf(u32);
-                    const rc = os.linux.getsockopt(sockfd, posix.SOL.SOCKET, posix.SO.ERROR, @as([*]u8, @ptrCast(&so_error)), &size);
-                    switch (rc) {
-                        0 => try print("port {} is open\n", .{address.getPort()}),
-                        else => try print("socket not connected trying to connect to port {}\n", .{address.getPort()}),
-                    }
-                },
-                else => try print("epoll_wait() failure trying to connect to port {}\n", .{address.getPort()}),
-            }
-        },
-        else => try print("failure trying to connect to port {}. error: {any}\n", .{ address.getPort(), err }),
-    }
-}
-
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -100,25 +51,58 @@ pub fn main() !void {
 
     var addr = addr_list.addrs[0];
 
-    const thr = try allocator.alloc(std.Thread, settings.ports.len);
-
     if (std.mem.eql(u8, settings.mode, "tcpsyn")) {
         std.debug.print("stealth mode\n", .{});
-        const s_addr = 172 << 24 | 30 << 16 | 188 << 8 | 242;
-        for (thr, 0..) |*item, i| {
-            addr.setPort(settings.ports[i]);
-            item.* = try std.Thread.spawn(.{}, tcp_syn.run, .{ s_addr, addr });
-        }
+        try tcp_syn.run(allocator, &addr, settings.ports);
     } else {
-        std.debug.print("normal mode\n", .{});
+        std.debug.print("default mode\n", .{});
+        const thr = try allocator.alloc(std.Thread, settings.ports.len);
         for (thr, 0..) |*item, i| {
             addr.setPort(settings.ports[i]);
             item.* = try std.Thread.spawn(.{}, connect, .{addr});
         }
+        for (thr) |t| {
+            t.join();
+        }
     }
+}
 
-    for (thr) |t| {
-        t.join();
+pub fn connect(address: std.net.Address) !void {
+    var sockfd: posix.fd_t = undefined;
+    sockfd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+    errdefer posix.close(sockfd);
+
+    _ = try posix.fcntl(sockfd, posix.F.SETFL, os.linux.SOCK.NONBLOCK);
+
+    if (posix.connect(sockfd, &address.any, address.getOsSockLen())) |_| {
+        try print("port {} is open\n", .{address.getPort()});
+    } else |err| switch (err) {
+        error.ConnectionRefused => try print("port {} is closed\n", .{address.getPort()}),
+        error.WouldBlock => {
+            const epollfd = try posix.epoll_create1(0);
+            var ev: os.linux.epoll_event = .{
+                .events = os.linux.EPOLL.OUT,
+                .data = .{ .fd = sockfd },
+            };
+            _ = try posix.epoll_ctl(epollfd, os.linux.EPOLL.CTL_ADD, sockfd, &ev);
+
+            var events: [1]os.linux.epoll_event = undefined;
+            const nfds = posix.epoll_wait(epollfd, &events, 1000);
+            switch (nfds) {
+                0 => try print("timeout trying to connect to port {}\n", .{address.getPort()}),
+                1 => {
+                    var so_error: i32 = undefined;
+                    var size: u32 = @sizeOf(u32);
+                    const rc = os.linux.getsockopt(sockfd, posix.SOL.SOCKET, posix.SO.ERROR, @as([*]u8, @ptrCast(&so_error)), &size);
+                    switch (rc) {
+                        0 => try print("port {} is open\n", .{address.getPort()}),
+                        else => try print("socket not connected trying to connect to port {}\n", .{address.getPort()}),
+                    }
+                },
+                else => try print("epoll_wait() failure trying to connect to port {}\n", .{address.getPort()}),
+            }
+        },
+        else => try print("failure trying to connect to port {}. error: {any}\n", .{ address.getPort(), err }),
     }
 }
 
@@ -144,7 +128,17 @@ fn parsePorts(ports_arg: [:0]u8, allocator: std.mem.Allocator) ![]u16 {
     return ports.items;
 }
 
-const Settings = struct {
+pub fn print(comptime message: []const u8, args: anytype) !void {
+    const stdout_file = std.io.getStdOut().writer();
+    var bw = std.io.bufferedWriter(stdout_file);
+    const stdout = bw.writer();
+
+    try stdout.print(message, args);
+
+    try bw.flush();
+}
+
+pub const Settings = struct {
     mode: []const u8 = "default",
     address: []u8 = undefined,
     ports: []const u16 = &[7]u16{ 22, 80, 443, 8080, 12017, 5432, 8081 },

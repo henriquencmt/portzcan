@@ -4,17 +4,67 @@ const os = std.os;
 const shr = std.math.shr;
 const shl = std.math.shl;
 
-pub fn print(comptime message: []const u8, args: anytype) !void {
+pub fn run(allocator: std.mem.Allocator, addr: *std.net.Address, ports: []const u16) !void {
     const stdout_file = std.io.getStdOut().writer();
     var bw = std.io.bufferedWriter(stdout_file);
     const stdout = bw.writer();
 
-    try stdout.print(message, args);
+    const s_addr = 172 << 24 | 30 << 16 | 188 << 8 | 242;
 
-    try bw.flush();
+    const socket = try setupSocket();
+    defer std.posix.close(socket);
+
+    const thr = try allocator.alloc(std.Thread, ports.len);
+    for (thr, 0..) |*item, i| {
+        addr.setPort(ports[i]);
+        item.* = try std.Thread.spawn(.{}, sendSyn, .{ s_addr, addr.*, socket });
+    }
+
+    for (thr) |t| {
+        t.join();
+    }
+
+    var buffer: [44]u8 = undefined;
+    var bytes: usize = undefined;
+    const epollfd = try posix.epoll_create1(0);
+    var ev: os.linux.epoll_event = .{
+        .events = os.linux.EPOLL.IN,
+        .data = .{ .fd = socket },
+    };
+    _ = try posix.epoll_ctl(epollfd, os.linux.EPOLL.CTL_ADD, socket, &ev);
+
+    var so_error: i32 = undefined;
+    var size: u32 = @sizeOf(u32);
+    const rc = os.linux.getsockopt(socket, posix.SOL.SOCKET, posix.SO.ERROR, @as([*]u8, @ptrCast(&so_error)), &size);
+    if (rc == 0) {
+        var events: [1]os.linux.epoll_event = undefined;
+        while (true) {
+            const nfds = posix.epoll_wait(epollfd, &events, 100);
+            switch (nfds) {
+                0 => break,
+                else => {
+                    if (nfds == -1) {
+                        try stdout.print("epoll_wait() failure\n", .{});
+                        try bw.flush();
+                    } else {
+                        bytes = try std.posix.recv(socket, &buffer, 0);
+                        const port = getSrcPort(&buffer);
+                        if (isSynAck(&buffer)) {
+                            try stdout.print("port {} is open\n", .{port});
+                            try bw.flush();
+                            // TODO if verbose
+                            // processPacket(bytes, &buffer);
+                        }
+                    }
+                },
+            }
+        }
+    } else {
+        std.debug.print("socket error: {}", .{so_error});
+    }
 }
 
-pub fn run(src_addr: u32, dest_addr: std.net.Address) !void {
+fn sendSyn(src_addr: u32, dest_addr: std.net.Address, socket: std.posix.fd_t) !void {
     const port = dest_addr.getPort();
 
     const dest_addr_arr = .{
@@ -119,7 +169,7 @@ pub fn run(src_addr: u32, dest_addr: std.net.Address) !void {
     const tcp_cs = checksum(tcp_payload[0..]);
     const tcp_checksum = [2]u8{ @as(u8, @truncate(tcp_cs >> 8)), @as(u8, @truncate(tcp_cs)) & 0xFF };
 
-    var packet = [_]u8{
+    const packet = [_]u8{
         ip_header.version << 4 | ip_header.ihl,
         ip_header.type_of_service,
         @as(u8, @truncate(ip_header.total_length >> 8)),
@@ -162,65 +212,9 @@ pub fn run(src_addr: u32, dest_addr: std.net.Address) !void {
         @as(u8, @truncate(tcp_header.urg_pointer)) & 0xFF,
     };
 
-    const socket = try setupSocket();
-    defer std.posix.close(socket);
-    try sendSyn(socket, &packet, dest_addr_arr);
-
-    var buffer: [4096]u8 = undefined;
-    var bytes: usize = undefined;
-    if (std.posix.recv(socket, &buffer, std.os.linux.MSG.DONTWAIT)) |b| {
-        bytes = b;
-        if (getSrcPort(&buffer) == port) {
-            if (isSynAck(&buffer)) {
-                try print("port {} is open\n", .{port});
-                // TODO if verbose
-                // processPacket(bytes, &buffer);
-                return;
-            }
-        }
-    } else |err| switch (err) {
-        error.WouldBlock => {
-            const epollfd = try posix.epoll_create1(0);
-            var ev: os.linux.epoll_event = .{
-                .events = os.linux.EPOLL.IN,
-                .data = .{ .fd = socket },
-            };
-            _ = try posix.epoll_ctl(epollfd, os.linux.EPOLL.CTL_ADD, socket, &ev);
-
-            var events: [3]os.linux.epoll_event = undefined;
-            const nfds = posix.epoll_wait(epollfd, &events, 1000);
-            switch (nfds) {
-                0 => try print("timeout trying to connect to port {}\n", .{port}),
-                else => {
-                    if (nfds == -1) {
-                        try print("epoll_wait() failure trying to connect to port {}\n", .{port});
-                    } else {
-                        var so_error: i32 = undefined;
-                        var size: u32 = @sizeOf(u32);
-                        const rc = os.linux.getsockopt(socket, posix.SOL.SOCKET, posix.SO.ERROR, @as([*]u8, @ptrCast(&so_error)), &size);
-                        switch (rc) {
-                            0 => {
-                                for (0..nfds + 1) |_| {
-                                    bytes = try std.posix.recv(socket, &buffer, 0);
-                                    if (getSrcPort(&buffer) == port) {
-                                        if (isSynAck(&buffer)) {
-                                            try print("port {} is open\n", .{port});
-                                            // TODO if verbose
-                                            // processPacket(bytes, &buffer);
-                                            return;
-                                        }
-                                    }
-                                }
-                                try print("timeout trying to connect to port {}\n", .{port});
-                            },
-                            else => try print("socket not connected trying to connect to port {}\n", .{port}),
-                        }
-                    }
-                },
-            }
-        },
-        else => try print("failure trying to connect to port {}. error: {any}\n", .{ port, err }),
-    }
+    const data: [14]u8 = .{ 0, 0 } ++ dest_addr_arr ++ .{ 0, 0, 0, 0, 0, 0, 0, 0 };
+    const target = std.posix.sockaddr{ .family = std.posix.AF.INET, .data = data };
+    _ = try std.posix.sendto(socket, &packet, 0, &target, @sizeOf(std.posix.sockaddr));
 }
 
 fn getSrcPort(buffer: []const u8) u16 {
@@ -237,12 +231,7 @@ fn isSynAck(buffer: []const u8) bool {
     return syn_flag and ack_flag;
 }
 
-fn sendSyn(socket: std.posix.fd_t, packet: []u8, ip: [4]u8) !void {
-    const dest_addr = std.posix.sockaddr{ .family = std.posix.AF.INET, .data = [14]u8{ 0, 0, ip[0], ip[1], ip[2], ip[3], 0, 0, 0, 0, 0, 0, 0, 0 } };
-    _ = try std.posix.sendto(socket, packet, 0, &dest_addr, @sizeOf(std.posix.sockaddr));
-}
-
-pub fn setupSocket() !std.posix.fd_t {
+fn setupSocket() !std.posix.fd_t {
     const sockfd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.RAW, std.posix.IPPROTO.TCP);
     errdefer std.posix.close(sockfd);
 

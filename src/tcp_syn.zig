@@ -14,12 +14,14 @@ pub fn print(comptime message: []const u8, args: anytype) !void {
     try bw.flush();
 }
 
-pub fn run(src_addr: u32, dest_addr: u32, port: u16) !void {
+pub fn run(src_addr: u32, dest_addr: std.net.Address) !void {
+    const port = dest_addr.getPort();
+
     const dest_addr_arr = .{
-        @as(u8, @truncate(dest_addr)),
-        @as(u8, @truncate(dest_addr >> 8)),
-        @as(u8, @truncate(dest_addr >> 16)),
-        @as(u8, @intCast(dest_addr >> 24)),
+        @as(u8, @truncate(dest_addr.in.sa.addr)),
+        @as(u8, @truncate(dest_addr.in.sa.addr >> 8)),
+        @as(u8, @truncate(dest_addr.in.sa.addr >> 16)),
+        @as(u8, @intCast(dest_addr.in.sa.addr >> 24)),
     };
 
     const ip_header = IPHeader{
@@ -33,7 +35,7 @@ pub fn run(src_addr: u32, dest_addr: u32, port: u16) !void {
         .protocol = 0x6,
         .header_checksum = 0x0,
         .saddr = src_addr,
-        .daddr = dest_addr,
+        .daddr = dest_addr.in.sa.addr,
     };
 
     var ip_payload = [_]u8{

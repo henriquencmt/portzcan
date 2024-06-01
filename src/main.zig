@@ -13,7 +13,7 @@ pub fn print(comptime message: []const u8, args: anytype) !void {
     try bw.flush();
 }
 
-pub fn connect(address: std.net.Address, port: u16) !void {
+pub fn connect(address: std.net.Address) !void {
     var sockfd: posix.fd_t = undefined;
     sockfd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
     errdefer posix.close(sockfd);
@@ -21,9 +21,9 @@ pub fn connect(address: std.net.Address, port: u16) !void {
     _ = try posix.fcntl(sockfd, posix.F.SETFL, os.linux.SOCK.NONBLOCK);
 
     if (posix.connect(sockfd, &address.any, address.getOsSockLen())) |_| {
-        try print("1: port {} is open\n", .{port});
+        try print("port {} is open\n", .{address.getPort()});
     } else |err| switch (err) {
-        error.ConnectionRefused => try print("port {} is closed\n", .{port}),
+        error.ConnectionRefused => try print("port {} is closed\n", .{address.getPort()}),
         error.WouldBlock => {
             const epollfd = try posix.epoll_create1(0);
             var ev: os.linux.epoll_event = .{
@@ -35,20 +35,20 @@ pub fn connect(address: std.net.Address, port: u16) !void {
             var events: [1]os.linux.epoll_event = undefined;
             const nfds = posix.epoll_wait(epollfd, &events, 1000);
             switch (nfds) {
-                0 => try print("timeout trying to connect to port {}\n", .{port}),
+                0 => try print("timeout trying to connect to port {}\n", .{address.getPort()}),
                 1 => {
                     var so_error: i32 = undefined;
                     var size: u32 = @sizeOf(u32);
                     const rc = os.linux.getsockopt(sockfd, posix.SOL.SOCKET, posix.SO.ERROR, @as([*]u8, @ptrCast(&so_error)), &size);
                     switch (rc) {
-                        0 => try print("2: port {} is open\n", .{port}),
-                        else => try print("socket not connected trying to connect to port {}\n", .{port}),
+                        0 => try print("port {} is open\n", .{address.getPort()}),
+                        else => try print("socket not connected trying to connect to port {}\n", .{address.getPort()}),
                     }
                 },
-                else => try print("epoll_wait() failure trying to connect to port {}\n", .{port}),
+                else => try print("epoll_wait() failure trying to connect to port {}\n", .{address.getPort()}),
             }
         },
-        else => try print("failure trying to connect to port {}. error: {any}\n", .{ port, err }),
+        else => try print("failure trying to connect to port {}. error: {any}\n", .{ address.getPort(), err }),
     }
 }
 
@@ -81,7 +81,7 @@ pub fn main() !void {
         4 => {
             settings.address = args[2][0..args[2].len];
             if (std.mem.eql(u8, args[1][0..args[1].len], "-s") and true) { // TODO match regex pattern
-                settings.mode = "synack";
+                settings.mode = "tcpsyn";
                 settings.address = args[2][0..args[2].len];
                 settings.ports = try parsePorts(args[3], allocator);
             } else {
@@ -103,15 +103,17 @@ pub fn main() !void {
     const thr = try allocator.alloc(std.Thread, settings.ports.len);
 
     if (std.mem.eql(u8, settings.mode, "tcpsyn")) {
+        std.debug.print("stealth mode\n", .{});
         const s_addr = 172 << 24 | 30 << 16 | 188 << 8 | 242;
         for (thr, 0..) |*item, i| {
-            // TODO addr.setPort(ports[i]);
-            item.* = try std.Thread.spawn(.{}, tcp_syn.run, .{ s_addr, addr.in.sa.addr, settings.ports[i] });
+            addr.setPort(settings.ports[i]);
+            item.* = try std.Thread.spawn(.{}, tcp_syn.run, .{ s_addr, addr });
         }
     } else {
+        std.debug.print("normal mode\n", .{});
         for (thr, 0..) |*item, i| {
             addr.setPort(settings.ports[i]);
-            item.* = try std.Thread.spawn(.{}, connect, .{ addr, settings.ports[i] });
+            item.* = try std.Thread.spawn(.{}, connect, .{addr});
         }
     }
 
@@ -125,14 +127,14 @@ fn parsePorts(ports_arg: [:0]u8, allocator: std.mem.Allocator) ![]u16 {
     var curr: []u8 = try allocator.alloc(u8, 5);
     var byte_count: usize = 0;
 
-    for (ports_arg) |port| {
-        if (port == 44) { // comma
+    for (ports_arg) |char| {
+        if (char == 44) { // comma
             try ports.append(try std.fmt.parseInt(u16, curr[0..byte_count], 10));
             allocator.free(curr);
             curr = try allocator.alloc(u8, 5);
             byte_count = 0;
         } else {
-            curr[byte_count] = port;
+            curr[byte_count] = char;
             byte_count += 1;
         }
     }

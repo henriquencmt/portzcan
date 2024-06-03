@@ -3,13 +3,15 @@ const posix = std.posix;
 const os = std.os;
 const shr = std.math.shr;
 const shl = std.math.shl;
+const host = @import("host.zig");
 
 pub fn run(allocator: std.mem.Allocator, addr: *std.net.Address, ports: []const u16) !void {
     const stdout_file = std.io.getStdOut().writer();
     var bw = std.io.bufferedWriter(stdout_file);
     const stdout = bw.writer();
 
-    const s_addr = 172 << 24 | 30 << 16 | 188 << 8 | 242;
+    const host_addr: [4]u8 = try host.getHostAddr();
+    const saddr = shl(u32, host_addr[0], 24) | shl(u32, host_addr[1], 16) | shl(u32, host_addr[2], 8) | host_addr[3];
 
     const socket = try setupSocket();
     defer std.posix.close(socket);
@@ -17,7 +19,7 @@ pub fn run(allocator: std.mem.Allocator, addr: *std.net.Address, ports: []const 
     const thr = try allocator.alloc(std.Thread, ports.len);
     for (thr, 0..) |*item, i| {
         addr.setPort(ports[i]);
-        item.* = try std.Thread.spawn(.{}, sendSyn, .{ s_addr, addr.*, socket });
+        item.* = try std.Thread.spawn(.{}, sendSyn, .{ saddr, addr.*, socket });
     }
 
     for (thr) |t| {

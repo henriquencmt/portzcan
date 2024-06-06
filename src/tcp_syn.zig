@@ -219,8 +219,8 @@ fn sendSyn(src_addr: u32, dest_addr: std.net.Address, socket: std.posix.fd_t) !v
     _ = try std.posix.sendto(socket, &packet, 0, &target, @sizeOf(std.posix.sockaddr));
 }
 
+/// Returns TCP segment header Source port
 fn getSrcPort(buffer: []const u8) u16 {
-    // TCP segment header Source port
     const octets = buffer[20..22];
     const src_port = shl(u16, octets[0], 8) | octets[1];
     return src_port;
@@ -231,6 +231,12 @@ fn isSynAck(buffer: []const u8) bool {
     const syn_flag = (tcp_header[13] & 2) != 0;
     const ack_flag = (tcp_header[13] & 16) != 0;
     return syn_flag and ack_flag;
+}
+
+test isSynAck {
+    var buff: [40]u8 = undefined;
+    buff[33] = 0b00010010;
+    try std.testing.expect(isSynAck(&buff));
 }
 
 fn setupSocket() !std.posix.fd_t {

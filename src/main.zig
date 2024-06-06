@@ -128,6 +128,18 @@ fn parsePorts(ports_arg: [:0]u8, allocator: std.mem.Allocator) ![]u16 {
     return ports.items;
 }
 
+test parsePorts {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    const p = try parsePorts(@as([:0]u8, @constCast("80,65535,8080")), allocator);
+
+    const expected = [_]u16{ 80, 65535, 8080 };
+    try std.testing.expect(std.mem.eql(u16, &expected, p));
+}
+
 pub fn print(comptime message: []const u8, args: anytype) !void {
     const stdout_file = std.io.getStdOut().writer();
     var bw = std.io.bufferedWriter(stdout_file);

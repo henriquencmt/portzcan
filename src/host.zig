@@ -4,11 +4,6 @@ const c = @cImport({
     @cInclude("netdb.h");
 });
 
-pub fn main() !void {
-    const addr = try getHostAddr();
-    std.debug.print("{any}", .{addr});
-}
-
 pub fn getHostAddr() ![4]u8 {
     var host_addr: [4]u8 = undefined;
     var ifaddr: ?*c.struct_ifaddrs = undefined;

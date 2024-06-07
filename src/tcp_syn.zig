@@ -76,7 +76,7 @@ fn sendSyn(src_addr: u32, dest_addr: std.net.Address, socket: std.posix.fd_t) !v
         @as(u8, @intCast(dest_addr.in.sa.addr >> 24)),
     };
 
-    const ip_header = IPHeader{
+    const ip_header = IpHeader{
         .version = 0x4,
         .ihl = 0x5,
         .type_of_service = 0x0,
@@ -116,7 +116,7 @@ fn sendSyn(src_addr: u32, dest_addr: std.net.Address, socket: std.posix.fd_t) !v
     const ip_cs = checksum(&ip_payload);
     const ip_checksum = [2]u8{ @as(u8, @truncate(ip_cs >> 8)), @as(u8, @truncate(ip_cs)) & 0xFF };
 
-    const tcp_header = TCPHeader{
+    const tcp_header = TcpHeader{
         .src_port = 0x3039,
         .dest_port = port,
         .seq_num = 0x0,
@@ -283,7 +283,7 @@ fn checksum(arr: []u8) u16 {
 //     try print("ACK Flag: {}\n", .{ack_flag});
 // }
 
-const IPHeader = packed struct {
+const IpHeader = packed struct {
     version: u8,
     ihl: u8,
     type_of_service: u8,
@@ -297,7 +297,7 @@ const IPHeader = packed struct {
     daddr: u32,
 };
 
-const TCPHeader = packed struct {
+const TcpHeader = packed struct {
     src_port: u16,
     dest_port: u16,
     seq_num: u32,

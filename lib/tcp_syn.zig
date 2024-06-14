@@ -3,70 +3,121 @@ const posix = std.posix;
 const os = std.os;
 const shr = std.math.shr;
 const shl = std.math.shl;
-const host = @import("host.zig");
+const c = @cImport({
+    @cInclude("ifaddrs.h");
+    @cInclude("netdb.h");
+});
 
-pub fn run(allocator: std.mem.Allocator, addr: *std.net.Address, ports: []const u16) !void {
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
+pub const TcpSynScanner = struct {
+    allocator: std.mem.Allocator,
+    addr: *std.net.Address,
 
-    const host_addr: [4]u8 = try host.getHostAddr();
-    const saddr = shl(u32, host_addr[0], 24) | shl(u32, host_addr[1], 16) | shl(u32, host_addr[2], 8) | host_addr[3];
-
-    const socket = try setupSocket();
-    defer std.posix.close(socket);
-
-    const thr = try allocator.alloc(std.Thread, ports.len);
-    for (thr, 0..) |*item, i| {
-        addr.setPort(ports[i]);
-        item.* = try std.Thread.spawn(.{}, sendSyn, .{ saddr, addr.*, socket });
+    pub fn init(allocator: std.mem.Allocator, addr: *std.net.Address) TcpSynScanner {
+        return .{
+            .allocator = allocator,
+            .addr = addr,
+        };
     }
 
-    for (thr) |t| {
-        t.join();
-    }
+    pub fn scan(self: TcpSynScanner, ports: []const u16) !void {
+        const stdout_file = std.io.getStdOut().writer();
+        var bw = std.io.bufferedWriter(stdout_file);
+        const stdout = bw.writer();
 
-    var buffer: [44]u8 = undefined;
-    var bytes: usize = undefined;
-    const epollfd = try posix.epoll_create1(0);
-    var ev: os.linux.epoll_event = .{
-        .events = os.linux.EPOLL.IN,
-        .data = .{ .fd = socket },
-    };
-    _ = try posix.epoll_ctl(epollfd, os.linux.EPOLL.CTL_ADD, socket, &ev);
+        const host_addr: [4]u8 = try getHostAddr();
+        const saddr = shl(u32, host_addr[0], 24) | shl(u32, host_addr[1], 16) | shl(u32, host_addr[2], 8) | host_addr[3];
 
-    var so_error: i32 = undefined;
-    var size: u32 = @sizeOf(u32);
-    const rc = os.linux.getsockopt(socket, posix.SOL.SOCKET, posix.SO.ERROR, @as([*]u8, @ptrCast(&so_error)), &size);
-    if (rc == 0) {
-        var events: [1]os.linux.epoll_event = undefined;
-        while (true) {
-            const nfds = posix.epoll_wait(epollfd, &events, 100);
-            switch (nfds) {
-                0 => break,
-                else => {
-                    if (nfds == -1) {
-                        try stdout.print("epoll_wait() failure\n", .{});
-                        try bw.flush();
-                    } else {
-                        bytes = try std.posix.recv(socket, &buffer, 0);
-                        const port = getSrcPort(&buffer);
-                        if (isSynAck(&buffer)) {
-                            try stdout.print("port {} is open\n", .{port});
-                            try bw.flush();
-                            // TODO if verbose
-                            // processPacket(bytes, &buffer);
-                        }
-                    }
-                },
-            }
+        const socket = try setupSocket();
+        defer std.posix.close(socket);
+
+        const thr = try self.allocator.alloc(std.Thread, ports.len);
+        for (thr, 0..) |*item, i| {
+            self.addr.setPort(ports[i]);
+            item.* = try std.Thread.spawn(.{}, sendSyn, .{ saddr, self.addr.*, socket });
         }
-    } else {
-        std.debug.print("socket error: {}", .{so_error});
+
+        for (thr) |t| {
+            t.join();
+        }
+
+        var buffer: [44]u8 = undefined;
+        var bytes: usize = undefined;
+        const epollfd = try posix.epoll_create1(0);
+        var ev: os.linux.epoll_event = .{
+            .events = os.linux.EPOLL.IN,
+            .data = .{ .fd = socket },
+        };
+        _ = try posix.epoll_ctl(epollfd, os.linux.EPOLL.CTL_ADD, socket, &ev);
+
+        var so_error: i32 = undefined;
+        var size: u32 = @sizeOf(u32);
+        const rc = os.linux.getsockopt(socket, posix.SOL.SOCKET, posix.SO.ERROR, @as([*]u8, @ptrCast(&so_error)), &size);
+        if (rc == 0) {
+            var events: [1]os.linux.epoll_event = undefined;
+            while (true) {
+                const nfds = posix.epoll_wait(epollfd, &events, 100);
+                switch (nfds) {
+                    0 => break,
+                    else => {
+                        if (nfds == -1) {
+                            try stdout.print("epoll_wait() failure\n", .{});
+                            try bw.flush();
+                        } else {
+                            bytes = try std.posix.recv(socket, &buffer, 0);
+                            const port = getSrcPort(&buffer);
+                            if (isSynAck(&buffer)) {
+                                try stdout.print("port {} is open\n", .{port});
+                                try bw.flush();
+                                // TODO if verbose
+                                // processPacket(bytes, &buffer);
+                            }
+                        }
+                    },
+                }
+            }
+        } else {
+            std.debug.print("socket error: {}", .{so_error});
+        }
     }
+};
+
+/// Returns TCP segment header Source port
+pub fn getSrcPort(buffer: []const u8) u16 {
+    const octets = buffer[20..22];
+    const src_port = shl(u16, octets[0], 8) | octets[1];
+    return src_port;
 }
 
-fn sendSyn(src_addr: u32, dest_addr: std.net.Address, socket: std.posix.fd_t) !void {
+pub fn isSynAck(buffer: []const u8) bool {
+    const tcp_header = buffer[20..40];
+    const syn_flag = (tcp_header[13] & 2) != 0;
+    const ack_flag = (tcp_header[13] & 16) != 0;
+    return syn_flag and ack_flag;
+}
+
+test isSynAck {
+    var buff: [40]u8 = undefined;
+    buff[33] = 0b00010010;
+    try std.testing.expect(isSynAck(&buff));
+}
+
+pub fn checksum(arr: []u8) u16 {
+    var sum: u32 = 0;
+    var i: usize = 0;
+
+    while (i < arr.len - 1) : (i += 2) {
+        const upperByte = @as(u16, @intCast(arr[i])) << 8;
+        const lowerByte = @as(u16, @intCast(arr[i + 1]));
+        const combinedValue = upperByte + lowerByte;
+        sum += combinedValue;
+    }
+
+    sum = (sum >> 16) + (sum & 0xFFFF);
+    sum = ~sum & 0xFFFF;
+    return @as(u16, @truncate(sum));
+}
+
+pub fn sendSyn(src_addr: u32, dest_addr: std.net.Address, socket: std.posix.fd_t) !void {
     const port = dest_addr.getPort();
 
     const dest_addr_arr = .{
@@ -219,27 +270,7 @@ fn sendSyn(src_addr: u32, dest_addr: std.net.Address, socket: std.posix.fd_t) !v
     _ = try std.posix.sendto(socket, &packet, 0, &target, @sizeOf(std.posix.sockaddr));
 }
 
-/// Returns TCP segment header Source port
-fn getSrcPort(buffer: []const u8) u16 {
-    const octets = buffer[20..22];
-    const src_port = shl(u16, octets[0], 8) | octets[1];
-    return src_port;
-}
-
-fn isSynAck(buffer: []const u8) bool {
-    const tcp_header = buffer[20..40];
-    const syn_flag = (tcp_header[13] & 2) != 0;
-    const ack_flag = (tcp_header[13] & 16) != 0;
-    return syn_flag and ack_flag;
-}
-
-test isSynAck {
-    var buff: [40]u8 = undefined;
-    buff[33] = 0b00010010;
-    try std.testing.expect(isSynAck(&buff));
-}
-
-fn setupSocket() !std.posix.fd_t {
+pub fn setupSocket() !std.posix.fd_t {
     const sockfd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.RAW, std.posix.IPPROTO.TCP);
     errdefer std.posix.close(sockfd);
 
@@ -247,21 +278,87 @@ fn setupSocket() !std.posix.fd_t {
     return sockfd;
 }
 
-fn checksum(arr: []u8) u16 {
-    var sum: u32 = 0;
-    var i: usize = 0;
+pub fn getHostAddr() ![4]u8 {
+    var host_addr: [4]u8 = undefined;
+    var ifaddr: ?*c.struct_ifaddrs = undefined;
+    var _host: [c.NI_MAXHOST]u8 = undefined;
+    const host = _host[0..];
 
-    while (i < arr.len - 1) : (i += 2) {
-        const upperByte = @as(u16, @intCast(arr[i])) << 8;
-        const lowerByte = @as(u16, @intCast(arr[i + 1]));
-        const combinedValue = upperByte + lowerByte;
-        sum += combinedValue;
+    if (c.getifaddrs(&ifaddr) == -1) {
+        @panic("getifaddrs");
+    }
+    defer c.freeifaddrs(ifaddr);
+
+    var ifa = ifaddr;
+    while (ifa) |addr| : (ifa = addr.ifa_next) {
+        if (addr.ifa_addr == null) continue;
+
+        const family = addr.ifa_addr.*.sa_family;
+
+        if (family == c.AF_INET or family == c.AF_INET6) {
+            const s = c.getnameinfo(
+                addr.ifa_addr,
+                if (family == c.AF_INET) @sizeOf(c.struct_sockaddr_in) else @sizeOf(c.struct_sockaddr_in6),
+                host,
+                c.NI_MAXHOST,
+                null,
+                0,
+                c.NI_NUMERICHOST,
+            );
+            if (s != 0) {
+                std.debug.print("getnameinfo() failed: {}\n", .{s});
+                @panic("getnameinfo() failed");
+            }
+
+            if (family == c.AF_INET) {
+                var address: [4]u8 = undefined;
+                var curr: usize = 0;
+                var first_byte: usize = 0;
+                for (host, 0..) |char, i| {
+                    if (char == 0) {
+                        address[curr] = try std.fmt.parseInt(u8, host[first_byte..i], 10);
+                        break;
+                    }
+                    if (char == 46) { // dot
+                        address[curr] = try std.fmt.parseInt(u8, host[first_byte..i], 10);
+                        first_byte = i + 1;
+                        curr += 1;
+                    }
+                }
+
+                if (!std.mem.eql(u8, &address, &[_]u8{ 127, 0, 0, 1 })) host_addr = address;
+            }
+        }
     }
 
-    sum = (sum >> 16) + (sum & 0xFFFF);
-    sum = ~sum & 0xFFFF;
-    return @as(u16, @truncate(sum));
+    return host_addr;
 }
+
+pub const IpHeader = packed struct {
+    version: u8,
+    ihl: u8,
+    type_of_service: u8,
+    total_length: u16,
+    identification: u16,
+    f_fo: u16,
+    ttl: u8,
+    protocol: u8,
+    header_checksum: u16,
+    saddr: u32,
+    daddr: u32,
+};
+
+pub const TcpHeader = packed struct {
+    src_port: u16,
+    dest_port: u16,
+    seq_num: u32,
+    ack_num: u32,
+    data_offset_res_flags: u8,
+    flags: u8,
+    window_size: u16,
+    checksum: u16,
+    urg_pointer: u16,
+};
 
 // fn processPacket(bytes: usize, buffer: []const u8) !void {
 //     const ip_header = buffer[0..20];
@@ -282,29 +379,3 @@ fn checksum(arr: []u8) u16 {
 //     try print("SYN Flag: {}\n", .{syn_flag});
 //     try print("ACK Flag: {}\n", .{ack_flag});
 // }
-
-const IpHeader = packed struct {
-    version: u8,
-    ihl: u8,
-    type_of_service: u8,
-    total_length: u16,
-    identification: u16,
-    f_fo: u16,
-    ttl: u8,
-    protocol: u8,
-    header_checksum: u16,
-    saddr: u32,
-    daddr: u32,
-};
-
-const TcpHeader = packed struct {
-    src_port: u16,
-    dest_port: u16,
-    seq_num: u32,
-    ack_num: u32,
-    data_offset_res_flags: u8,
-    flags: u8,
-    window_size: u16,
-    checksum: u16,
-    urg_pointer: u16,
-};

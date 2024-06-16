@@ -4,6 +4,7 @@ const std = @import("std");
 // declaratively construct a build graph that will be executed by an external
 // runner.
 pub fn build(b: *std.Build) void {
+
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -15,6 +16,8 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    const lib = b.addModule("lib", .{ .root_source_file = b.path("lib/portzcan.zig") });
+
     const exe = b.addExecutable(.{
         .name = "portzcan",
         .root_source_file = .{ .path = "src/main.zig" },
@@ -23,6 +26,7 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.linkLibC();
+    exe.root_module.addImport("portzcan", lib);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -58,7 +62,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const tcp_syn_tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/tcp_syn.zig" },
+        .root_source_file = .{ .path = "lib/tcp_syn.zig" },
         .target = target,
         .optimize = optimize,
     });

@@ -13,6 +13,11 @@ pub fn main() !void {
 
     var settings: Settings = .{};
 
+    // TODO output to file
+    // const file = try std.fs.cwd().createFile("<file-name-from-args>", .{});
+    // defer file.close();
+    // const settings.writer = file.writer();
+
     switch (args.len) {
         2 => {
             settings.address = args[1][0..args[1].len];
@@ -53,11 +58,11 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, settings.mode, "tcpsyn")) {
         std.debug.print("stealth mode\n", .{});
-        const scanner = portzcan.TcpSynScanner.init(allocator, &addr);
+        const scanner = portzcan.TcpSynScanner.init(allocator, &addr, settings.output);
         try scanner.scan(settings.ports);
     } else {
         std.debug.print("default mode\n", .{});
-        const scanner = portzcan.TcpConnectScanner{ .allocator = allocator, .addr = &addr };
+        const scanner = portzcan.TcpConnectScanner.init(allocator, &addr, settings.output);
         try scanner.scan(settings.ports);
     }
 }
@@ -96,18 +101,9 @@ test parsePorts {
     try std.testing.expect(std.mem.eql(u16, &expected, p));
 }
 
-pub fn print(comptime message: []const u8, args: anytype) !void {
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
-
-    try stdout.print(message, args);
-
-    try bw.flush();
-}
-
 const Settings = struct {
     mode: []const u8 = "default",
     address: []u8 = undefined,
     ports: []const u16 = &[7]u16{ 22, 80, 443, 8080, 12017, 5432, 8081 },
+    output: std.fs.File.Writer = std.io.getStdOut().writer(),
 };

@@ -11,18 +11,19 @@ const c = @cImport({
 pub const TcpSynScanner = struct {
     allocator: std.mem.Allocator,
     addr: *std.net.Address,
+    writer: std.fs.File.Writer,
 
-    pub fn init(allocator: std.mem.Allocator, addr: *std.net.Address) TcpSynScanner {
+    pub fn init(allocator: std.mem.Allocator, addr: *std.net.Address, writer: ?std.fs.File.Writer) TcpSynScanner {
         return .{
             .allocator = allocator,
             .addr = addr,
+            .writer = writer orelse std.io.getStdErr().writer(),
         };
     }
 
     pub fn scan(self: TcpSynScanner, ports: []const u16) !void {
-        const stdout_file = std.io.getStdOut().writer();
-        var bw = std.io.bufferedWriter(stdout_file);
-        const stdout = bw.writer();
+        var bw = std.io.bufferedWriter(self.writer);
+        const writer = bw.writer();
 
         const host_addr: [4]u8 = try getHostAddr();
         const saddr = shl(u32, host_addr[0], 24) | shl(u32, host_addr[1], 16) | shl(u32, host_addr[2], 8) | host_addr[3];
@@ -60,13 +61,13 @@ pub const TcpSynScanner = struct {
                     0 => break,
                     else => {
                         if (nfds == -1) {
-                            try stdout.print("epoll_wait() failure\n", .{});
+                            try writer.print("epoll_wait() failure\n", .{});
                             try bw.flush();
                         } else {
                             bytes = try std.posix.recv(socket, &buffer, 0);
                             const port = getSrcPort(&buffer);
                             if (isSynAck(&buffer)) {
-                                try stdout.print("port {} is open\n", .{port});
+                                try writer.print("port {} is open\n", .{port});
                                 try bw.flush();
                                 // TODO if verbose
                                 // processPacket(bytes, &buffer);
@@ -76,7 +77,7 @@ pub const TcpSynScanner = struct {
                 }
             }
         } else {
-            std.debug.print("socket error: {}", .{so_error});
+            try writer.print("socket error: {}", .{so_error});
         }
     }
 };

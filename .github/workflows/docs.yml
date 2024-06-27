@@ -14,10 +14,10 @@ jobs:
           version: 0.13.0
       - name: docs
         run: zig build docs
-      - name: Upload
-        uses: actions/upload-pages-artifact@v2
+      - name: upload
+        uses: actions/upload-pages-artifact@v3
         with:
-          path: "zig-out/doc/"
+          path: zig-out/doc/
   deploy:
     needs: build
     permissions:
